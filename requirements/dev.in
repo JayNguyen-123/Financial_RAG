@@ -1,0 +1,7 @@
+-r api.in
+pytest==8.3.4
+pytest-cov==6.0.0
+httpx==0.27.2
+ruff==0.8.4
+pip-audit==2.7.3
+moto[s3]==5.0.22

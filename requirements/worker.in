@@ -1,0 +1,30 @@
+# Celery worker (computer-vision stack). Detectron2 is not on PyPI; it is
+# built from a pinned commit in the Dockerfile's worker-builder stage.
+-r api.in
+
+# CPU wheels from the official PyTorch index. (The original line
+# "torch==2.4.1 --extra-index-url https://pytorch.org" is not valid pip syntax
+# and pointed at the PyTorch website, not a package index.)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.4.1+cpu
+torchvision==0.19.1+cpu
+
+layoutparser==0.3.4
+pdf2image==1.17.0
+opencv-python-headless==4.10.0.84
+pillow==10.4.0
+pycocotools==2.0.8
+fvcore==0.1.5.post20221221
+iopath==0.1.9
+pytesseract==0.3.13               # narrative-text OCR (needs the tesseract-ocr apt package)
+
+# Detectron2 runtime dependencies (it is installed with --no-deps so the
+# hashed install of everything else stays enforceable).
+matplotlib==3.9.4
+termcolor==2.5.0
+yacs==0.1.8
+tabulate==0.9.0
+cloudpickle==3.1.0
+tqdm==4.67.1
+omegaconf==2.3.0
+hydra-core==1.3.2
