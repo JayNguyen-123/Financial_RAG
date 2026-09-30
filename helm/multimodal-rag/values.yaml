@@ -1,0 +1,227 @@
+# ────────────────────────────────────────────────────────────────────
+# IMAGES  (CI pushes <repo>/api and <repo>/worker; tag = git SHA)
+# ────────────────────────────────────────────────────────────────────
+image:
+  api:
+    repository: ghcr.io/your-org/your-repo/api
+    tag: ""            # defaults to .Chart.AppVersion; never deploy "latest" to prod
+    pullPolicy: IfNotPresent
+  worker:
+    repository: ghcr.io/your-org/your-repo/worker
+    tag: ""
+    pullPolicy: IfNotPresent
+
+imagePullSecrets:
+  - name: ghcr-secret
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  # For S3 without static keys use workload identity, e.g.
+  #   eks.amazonaws.com/role-arn: arn:aws:iam::<acct>:role/rag-s3
+  #   iam.gke.io/gcp-service-account: rag@<project>.iam.gserviceaccount.com
+  annotations: {}
+
+# Shared hardened security contexts
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+# ────────────────────────────────────────────────────────────────────
+# API
+# ────────────────────────────────────────────────────────────────────
+api:
+  replicaCount: 2
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits: { memory: 1Gi }
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 70
+  podDisruptionBudget:
+    minAvailable: 1
+  # Restrict inbound traffic: API port from anywhere in-cluster (ingress
+  # controller), metrics port only from the monitoring namespace.
+  networkPolicy:
+    enabled: true
+    metricsNamespaceSelector:
+      kubernetes.io/metadata.name: monitoring
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ────────────────────────────────────────────────────────────────────
+# WORKER
+# ────────────────────────────────────────────────────────────────────
+worker:
+  replicaCount: 2          # ignored when autoscaling.keda.enabled=true
+  concurrency: 2
+  resources:
+    requests: { cpu: "1", memory: 3Gi }
+    limits: { memory: 6Gi }
+  terminationGracePeriodSeconds: 300   # let in-flight ingestions finish on rollout
+  # Scale workers on ingestion queue depth (requires KEDA in the cluster).
+  autoscaling:
+    keda:
+      enabled: true
+      minReplicas: 1        # 0 = scale to zero (first job then waits for model load)
+      maxReplicas: 10
+      listLength: "4"       # target queued jobs per worker replica
+      pollingInterval: 15
+      cooldownPeriod: 600   # workers are slow to start; avoid flapping
+      # Defaults to the in-chart Redis. Set for an external Redis (host:port).
+      redisAddress: ""
+      kedaNamespace: keda   # allowed through the Redis NetworkPolicy
+  podDisruptionBudget:
+    # maxUnavailable (not minAvailable) so a single KEDA-scaled replica
+    # never blocks node drains.
+    maxUnavailable: 1
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ────────────────────────────────────────────────────────────────────
+# NON-SECRET APPLICATION CONFIG (rendered into a ConfigMap)
+# ────────────────────────────────────────────────────────────────────
+config:
+  ENV: production
+  LOG_LEVEL: INFO
+  LOG_JSON: "true"
+  PINECONE_INDEX_NAME: financial-scans
+  PINECONE_NAMESPACE_PREFIX: tenant-
+  JWT_ALGORITHM: HS256
+  JWT_ISSUER: ""
+  JWT_AUDIENCE: ""
+  JWT_INGEST_SCOPE: rag:ingest
+  JWT_ADMIN_SCOPE: rag:admin
+  TENANT_CLAIM: tenant_id
+  GROUPS_CLAIM: groups
+  REQUIRE_TENANT: "true"
+  QUOTA_ENABLED: "true"
+  QUOTA_FAIL_OPEN: "true"
+  QUERY_RATE_PER_MINUTE: "30"
+  INGEST_RATE_PER_HOUR: "60"
+  DAILY_TOKEN_BUDGET: "2000000"
+  TEXT_EXTRACTION: tesseract
+  RETAIN_ORIGINALS: "true"
+  METRICS_PORT: "9000"
+  LANGCHAIN_TRACING_V2: "false"   # set "true" only if LANGCHAIN_API_KEY is in the Secret (boot fails otherwise)
+  LANGCHAIN_PROJECT: financial-multimodal-rag
+  RETRIEVAL_TOP_K: "4"
+  MAX_UPLOAD_MB: "50"
+  MAX_PDF_PAGES: "300"
+  # Leave empty to use the in-chart Redis; set to a managed Redis URL otherwise.
+  REDIS_URL: ""
+
+# ────────────────────────────────────────────────────────────────────
+# SECRETS
+# Production: create the Secret out-of-band (ExternalSecrets / Sealed Secrets /
+# Vault) and set existingSecret. It must contain the keys:
+#   OPENAI_API_KEY, PINECONE_API_KEY, JWT_SECRET, LANGCHAIN_API_KEY
+# Plaintext values below are ONLY for throwaway clusters; never commit them.
+# ────────────────────────────────────────────────────────────────────
+secrets:
+  existingSecret: ""
+  values:
+    OPENAI_API_KEY: ""
+    PINECONE_API_KEY: ""
+    JWT_SECRET: ""
+    LANGCHAIN_API_KEY: ""
+    # Only if workload identity is unavailable (prefer serviceAccount annotations):
+    # AWS_ACCESS_KEY_ID: ""
+    # AWS_SECRET_ACCESS_KEY: ""
+
+# ────────────────────────────────────────────────────────────────────
+# STORAGE (originals, image crops, document manifests)
+#   s3    - recommended: any S3-compatible bucket; no shared volume needed.
+#           Grant the ServiceAccount bucket access via workload identity.
+#   local - a ReadWriteMany PVC shared by API and worker pods.
+# ────────────────────────────────────────────────────────────────────
+storage:
+  backend: s3
+  s3:
+    bucket: your-rag-bucket
+    prefix: ""
+    endpointUrl: ""       # blank for AWS; https://storage.googleapis.com for GCS
+    region: us-east-1
+  scratchSizeLimit: 2Gi   # per-pod emptyDir for in-flight uploads/renders
+
+# Used only when storage.backend=local
+persistence:
+  existingClaim: ""
+  accessMode: ReadWriteMany
+  size: 20Gi
+  storageClass: ""     # e.g. efs-sc (AWS), filestore (GKE), azurefile (AKS)
+
+# ────────────────────────────────────────────────────────────────────
+# NETWORKING
+# ────────────────────────────────────────────────────────────────────
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "55m"       # > MAX_UPLOAD_MB (nginx default is 1m)
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"        # required for SSE streaming
+    nginx.ingress.kubernetes.io/limit-rps: "10"
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: rag.yourcompany.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: rag-yourcompany-com-tls
+      hosts:
+        - rag.yourcompany.com
+
+# ────────────────────────────────────────────────────────────────────
+# IN-CHART REDIS (Celery broker + result backend)
+# For production prefer a managed Redis with auth/TLS and set config.REDIS_URL.
+# ────────────────────────────────────────────────────────────────────
+redis:
+  enabled: true
+  image: redis:7.4-alpine
+  persistence:
+    enabled: true      # AOF on disk so queued tasks survive a Redis restart
+    size: 2Gi
+    storageClass: ""
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { memory: 512Mi }
+  networkPolicy:
+    enabled: true      # only API/worker pods may connect
+
+# ────────────────────────────────────────────────────────────────────
+# OBSERVABILITY
+# ────────────────────────────────────────────────────────────────────
+telemetry:
+  serviceMonitor:
+    enabled: true
+    interval: 15s
+    scrapeTimeout: 10s
+    labels:
+      release: prometheus
+
+grafana:
+  dashboards:
+    enabled: true

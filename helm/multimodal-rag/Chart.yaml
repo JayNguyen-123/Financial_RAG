@@ -1,0 +1,17 @@
+apiVersion: v2
+name: multimodal-rag
+description: Multimodal Financial RAG - FastAPI gateway, Celery CV workers, Redis broker, Prometheus/Grafana telemetry.
+type: application
+# Bump on every chart change.
+version: 1.1.0
+# Default image tag when image.*.tag is empty. CI should set image tags to the git SHA.
+appVersion: "1.1.0"
+kubeVersion: ">=1.25.0-0"
+keywords:
+  - financial-rag
+  - multimodal-ai
+  - fastapi
+  - celery
+maintainers:
+  - name: "DevOps Engineering Team"
+    email: "devops@yourcompany.internal"
