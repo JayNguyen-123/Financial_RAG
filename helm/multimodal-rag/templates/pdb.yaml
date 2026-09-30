@@ -1,0 +1,20 @@
+{{- range $component := list "api" "worker" }}
+{{- with (index $.Values $component).podDisruptionBudget }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "rag.fullname" $ }}-{{ $component }}
+  labels:
+    {{- include "rag.labels" $ | nindent 4 }}
+spec:
+  {{- if hasKey . "maxUnavailable" }}
+  maxUnavailable: {{ .maxUnavailable }}
+  {{- else }}
+  minAvailable: {{ .minAvailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "rag.selectorLabels" (dict "ctx" $ "component" $component) | nindent 6 }}
+{{- end }}
+{{- end }}

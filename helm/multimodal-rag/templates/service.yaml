@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "rag.fullname" . }}-api
+  labels:
+    {{- include "rag.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: http-api
+      port: {{ .Values.service.port }}
+      targetPort: http-api
+      protocol: TCP
+    # Cluster-internal only: the Ingress routes to http-api exclusively, and the
+    # API NetworkPolicy admits this port only from the monitoring namespace.
+    - name: metrics
+      port: {{ .Values.config.METRICS_PORT | default "9000" | int }}
+      targetPort: metrics
+      protocol: TCP
+  selector:
+    {{- include "rag.selectorLabels" (dict "ctx" . "component" "api") | nindent 4 }}

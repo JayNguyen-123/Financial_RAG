@@ -1,0 +1,12 @@
+{{- if .Values.grafana.dashboards.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "rag.fullname" . }}-grafana-dashboards
+  labels:
+    {{- include "rag.labels" . | nindent 4 }}
+    # Discovered by the Grafana dashboard sidecar (kube-prometheus-stack default label).
+    grafana_dashboard: "1"
+data:
+{{ (.Files.Glob "dashboards/*.json").AsConfig | indent 2 }}
+{{- end }}

@@ -1,0 +1,35 @@
+{{- if .Values.worker.autoscaling.keda.enabled }}
+{{- $k := .Values.worker.autoscaling.keda }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "rag.fullname" . }}-worker
+  labels:
+    {{- include "rag.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  scaleTargetRef:
+    name: {{ include "rag.fullname" . }}-worker
+  minReplicaCount: {{ $k.minReplicas }}
+  maxReplicaCount: {{ $k.maxReplicas }}
+  pollingInterval: {{ $k.pollingInterval }}
+  cooldownPeriod: {{ $k.cooldownPeriod }}
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          # Scale in slowly: each removed pod may be mid-way through a long job
+          # (acks_late requeues it, but the work is wasted).
+          stabilizationWindowSeconds: 600
+          policies:
+            - type: Pods
+              value: 1
+              periodSeconds: 120
+  triggers:
+    - type: redis
+      metadata:
+        address: {{ include "rag.redisAddress" . | quote }}
+        listName: ingestion          # Celery task_default_queue
+        listLength: {{ $k.listLength | quote }}
+        databaseIndex: "0"
+{{- end }}

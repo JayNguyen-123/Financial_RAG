@@ -1,0 +1,26 @@
+{{- if .Values.api.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "rag.fullname" . }}-api
+  labels:
+    {{- include "rag.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "rag.selectorLabels" (dict "ctx" . "component" "api") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    # API traffic (ingress controller, in-cluster clients, kubelet probes)
+    - ports:
+        - port: 8000
+          protocol: TCP
+    # Metrics only from the monitoring namespace (Prometheus)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.api.networkPolicy.metricsNamespaceSelector | nindent 14 }}
+      ports:
+        - port: {{ .Values.config.METRICS_PORT | default "9000" | int }}
+          protocol: TCP
+{{- end }}

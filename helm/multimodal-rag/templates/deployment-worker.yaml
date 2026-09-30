@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rag.fullname" . }}-worker
+  labels:
+    {{- include "rag.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  {{- if not .Values.worker.autoscaling.keda.enabled }}
+  replicas: {{ .Values.worker.replicaCount }}
+  {{- end }}
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      {{- include "rag.selectorLabels" (dict "ctx" . "component" "worker") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "rag.labels" . | nindent 8 }}
+        app.kubernetes.io/component: worker
+      annotations:
+        {{- include "rag.configChecksums" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "rag.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
+      containers:
+        - name: worker
+          image: "{{ .Values.image.worker.repository }}:{{ .Values.image.worker.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.worker.pullPolicy }}
+          command:
+            - celery
+            - -A
+            - src.tasks.celery_app
+            - worker
+            - -Q
+            - ingestion
+            - --loglevel={{ .Values.config.LOG_LEVEL | default "INFO" }}
+            - --concurrency={{ .Values.worker.concurrency }}
+            - --without-gossip
+            - --without-mingle
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          {{- include "rag.appEnv" . | nindent 10 }}
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "celery -A src.tasks.celery_app inspect ping -d celery@$HOSTNAME --timeout 10"]
+            initialDelaySeconds: 60
+            periodSeconds: 120
+            timeoutSeconds: 30
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "rag.appVolumeMounts" . | nindent 12 }}
+      volumes:
+        {{- include "rag.appVolumes" . | nindent 8 }}
+      {{- with .Values.worker.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
