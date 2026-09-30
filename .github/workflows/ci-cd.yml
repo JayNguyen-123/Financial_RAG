@@ -1,1 +1,177 @@
+name: CI/CD - Multimodal RAG Service
 
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same branch/PR.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  # ── 1. Lint, unit tests, dependency audit (no secrets, no network services) ──
+  test:
+    name: Lint & Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements/*.lock
+
+      - name: Verify lock files exist
+        run: |
+          for f in api worker dev; do
+            test -f requirements/$f.lock || { echo "::error::requirements/$f.lock missing - run ./scripts/lock.sh and commit"; exit 1; }
+          done
+
+      - name: Install dependencies (hash-checked)
+        run: pip install --require-hashes --no-deps -r requirements/dev.lock
+
+      - name: Ruff (lint)
+        run: ruff check .
+
+      - name: Pytest
+        run: pytest --cov=src --cov=config --cov-report=term-missing --cov-report=xml
+
+      - name: Dependency vulnerability audit
+        run: |
+          pip-audit --require-hashes --disable-pip -r requirements/api.lock
+          pip-audit --require-hashes --disable-pip -r requirements/worker.lock
+
+  # ── 2. Helm chart validation ──────────────────────────────────────────────
+  helm:
+    name: Helm Lint & Template
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Lint and render chart (both storage modes)
+        run: |
+          helm lint helm/multimodal-rag --strict --set secrets.existingSecret=ci-dummy
+          helm template ci helm/multimodal-rag --set secrets.existingSecret=ci-dummy > /tmp/s3.yaml
+          helm template ci helm/multimodal-rag --set secrets.existingSecret=ci-dummy \
+            --set storage.backend=local --set worker.autoscaling.keda.enabled=false > /tmp/local.yaml
+      - name: Validate manifests against Kubernetes + CRD schemas
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar xz
+          ./kubeconform -strict -summary -kubernetes-version 1.29.0 \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            /tmp/s3.yaml /tmp/local.yaml
+
+  # ── 3. LangSmith regression gate (needs secrets; skipped for fork PRs) ────
+  eval:
+    name: LangSmith Smoke Eval
+    needs: test
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements/*.lock
+      - run: pip install --require-hashes --no-deps -r requirements/api.lock
+      - name: Run evaluation gate
+        env:
+          ENV: test
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
+          PINECONE_INDEX_NAME: ${{ vars.EVAL_PINECONE_INDEX || 'financial-scans-eval' }}
+          LANGCHAIN_API_KEY: ${{ secrets.LANGCHAIN_API_KEY }}
+          LANGCHAIN_TRACING_V2: "true"
+          JWT_SECRET: not-used-by-the-eval-but-required-by-settings
+          EVAL_TENANT: ${{ vars.EVAL_TENANT || 'eval' }}
+          # Crops for the golden documents (optional: summaries alone still work).
+          STORAGE_BACKEND: ${{ vars.EVAL_STORAGE_BACKEND || 'local' }}
+          S3_BUCKET: ${{ vars.EVAL_S3_BUCKET }}
+          STORAGE_PATH: ./eval_store
+          QUOTA_ENABLED: "false"
+          EVAL_ACCURACY_THRESHOLD: "0.90"
+        # Run as a module so `config` and `src` resolve from the repo root
+        # (the original `python src/smoke_test.py` put src/ on sys.path instead).
+        run: python -m src.smoke_test
+
+  # ── 4. Build (every run) and push (main only) both images ─────────────────
+  build:
+    name: Build ${{ matrix.target }} image
+    needs: [test, helm, eval]
+    # eval is skipped for fork PRs; still build (without push) in that case.
+    if: always() && needs.test.result == 'success' && needs.helm.result == 'success' && (needs.eval.result == 'success' || needs.eval.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [api, worker]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # metadata-action lower-cases the name (GHCR rejects upper-case repos).
+          images: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.target }}
+          tags: |
+            type=sha,format=long
+            type=ref,event=pr
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: ${{ matrix.target }}
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.target }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.target }}
+          provenance: true
+          sbom: true
+
+  # ── 5. Single Slack alert for any failure ─────────────────────────────────
+  notify:
+    name: Notify Slack on failure
+    needs: [test, helm, eval, build]
+    if: failure() && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_CHANNEL: ${{ vars.SLACK_CHANNEL || 'ci-alerts' }}
+          SLACK_COLOR: '#FF0000'
+          SLACK_TITLE: 'CI/CD failed on ${{ github.ref_name }}'
+          SLACK_MESSAGE: 'Lint/tests, Helm validation, LangSmith accuracy gate, or image build failed for ${{ github.sha }}. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          SLACK_USERNAME: GitHub Actions RAG Bot
