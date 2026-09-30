@@ -1,0 +1,30 @@
+[project]
+name = "multimodal-financial-rag"
+version = "1.1.0"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["helm"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "ASYNC"]
+ignore = [
+  "S101",   # assert in tests
+  "S104",   # binding 0.0.0.0 is intended in containers
+  "B008",   # FastAPI Depends() in defaults is idiomatic
+  "UP007",  # keep Optional[...] for readability
+  "UP006", "UP035",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S105", "S106", "E402"]
+
+[tool.coverage.run]
+omit = ["src/layout_pipeline.py", "src/smoke_test.py"]
